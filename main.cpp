@@ -962,8 +962,7 @@ void game_main() {
                             grid_depressed_x = x;
                             grid_depressed_y = y;
                         }
-                    }
-                    else if (evt.type == SDL_MOUSEBUTTONDOWN && evt.button.button == SDL_BUTTON_MIDDLE) {
+                    } else if (evt.type == SDL_MOUSEBUTTONDOWN && evt.button.button == SDL_BUTTON_MIDDLE) {
                         for (int j = std::max(y - 1, 0); j <= std::min(y + 1, grid_height - 1); ++j) {
                             for (int i = std::max(x - 1, 0); i <= std::min(x + 1, grid_width - 1); ++i) {
                                 if (!minefield[grid_width * j + i].visible && !minefield[grid_width * j + i].flag && !minefield[grid_width * j + i].qmark) {
@@ -989,24 +988,20 @@ void game_main() {
                             grid_depressed = false;
                             render_toolbar();  // Update smiley face
                         }
-                        if (!minefield[grid_width * y + x].flag
-                            && !minefield[grid_width * y + x].qmark) {
-
-                            for (int j = std::max(y - 1, 0); j <= std::min(y + 1, grid_height - 1); ++j) {
-                                for (int i = std::max(x - 1, 0); i <= std::min(x + 1, grid_width - 1); ++i) {
-                                    if (!minefield[grid_width * j + i].visible && !minefield[grid_width * j + i].flag && !minefield[grid_width * j + i].qmark) {
-                                        render_cell(i, j, empty);
-                                    }
+                        for (int j = std::max(y - 1, 0); j <= std::min(y + 1, grid_height - 1); ++j) {
+                            for (int i = std::max(x - 1, 0); i <= std::min(x + 1, grid_width - 1); ++i) {
+                                if (!minefield[grid_width * j + i].visible && !minefield[grid_width * j + i].flag && !minefield[grid_width * j + i].qmark) {
+                                    render_cell(i, j, empty);
                                 }
                             }
-
-                            if (!grid_depressed) {
-                                grid_depressed = true;
-                                render_toolbar();  // Update smiley face
-                            }
-                            grid_depressed_x = x;
-                            grid_depressed_y = y;
                         }
+
+                        if (!grid_depressed) {
+                            grid_depressed = true;
+                            render_toolbar();  // Update smiley face
+                        }
+                        grid_depressed_x = x;
+                        grid_depressed_y = y;
 
                     } else if (evt.type == SDL_MOUSEBUTTONUP && evt.button.button == SDL_BUTTON_MIDDLE) {
                         if (minefield[grid_width * y + x].visible) {
