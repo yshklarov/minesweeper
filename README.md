@@ -4,11 +4,10 @@ Minesweeper
 Minesweeper clone by yakov and 8.5tails.
 
 
-Screenshots
------------
+Screenshot
+----------
 
 ![screenshot 1](screenshots/screenshot_1.png)
-![screenshot 2](screenshots/screenshot_2.png)
 
 
 Building
