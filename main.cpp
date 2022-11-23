@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cmath>
 #include <iostream>
 #include <random>
 #include <string>
@@ -15,8 +16,16 @@
 #include <SDL.h>
 #include <SDL_image.h>
 
+// Linear integer programming library for "luck" mode
+#ifdef WIN32
+#include <lp_lib.h>
+#else
+#include <lpsolve/lp_lib.h>
+#endif
+
+
 enum side {left, right};
-enum luck {neutral, good, bad};
+enum luck {neutral, great, good, bad};
 
 struct cell {
     bool mine;
@@ -61,11 +70,12 @@ static const char* const TITLE{ "Minesweeper" };
 static const int MAX_WINDOW_WIDTH {4000};
 static const int MAX_WINDOW_HEIGHT {3000};
 static const int MAX_FPS {120};
+static const int COMPUTE_TIMEOUT_MS {1000};
 static const int BORDER_WIDTH {5};
 static const int TOOLBAR_HEIGHT {40};
 static const int DISPLAY1_WIDTH {25};
 static const int DISPLAY3_WIDTH {67};
-static const double MINE_DENSITY[10] { 0., 0.05, 0.08, 0.10, 0.12, 0.15, 0.18, 0.2, 0.25, 1. };
+static const double MINE_DENSITY[10] { 0., 0.05, 0.10, 0.12, 0.14, 0.17, 0.20, 0.25, 0.50, 1. };
 static const int CELL_DIM[10] { 10, 15, 20, 25, 30, 35, 40, 50, 60, 80 };
 static const int GRID_WIDTH[10] { 5, 8, 13, 21, 34, 55, 89, 144, 233, 377 };
 static const int GRID_HEIGHT[10] { 3, 5, 8, 13, 21, 34, 55, 89, 144, 233 };
@@ -98,12 +108,12 @@ SDL_Window *window;
 SDL_Renderer *renderer;
 SDL_Texture *window_buffer;
 
-SDL_Texture *(adj[9]);  // adj[0] == empty
+SDL_Texture *adj[9];  // adj[0] == empty
 SDL_Texture *hidden, *empty, *flag, *qmark, *qmark_off, *mistake, *mine, *boom;
 SDL_Texture *face_basic, *face_lost, *face_pending, *face_won;
-SDL_Texture *(seg[10]), *seg_off, *seg_minus, *seg_E, *seg_r, *seg_bg_single, *seg_bg_triple;
+SDL_Texture *seg[10], *seg_off, *seg_minus, *seg_E, *seg_r, *seg_bg_single, *seg_bg_triple;
 SDL_Texture *density_less, *density_more, *size_less, *size_more, *zoom_in, *zoom_out;
-SDL_Texture *luck_neutral, *luck_good, *luck_bad;
+SDL_Texture *luck_neutral, *luck_great, *luck_good, *luck_bad;
 
 std::random_device rdev {};
 std::default_random_engine gen {rdev()};
@@ -117,6 +127,34 @@ void inform(std::string msg) {
 #else
     std::cerr << msg << std::endl;
 #endif
+}
+
+// Randomly pick a combination uniformly from the (n choose k) possibilities. Store the result in combination.
+// Implements Robert Floyd's algorithm.
+void random_combination(int n, int k, bool *combination) {
+    assert(k >= 0);
+    assert(n >= k);
+    for (int i {0}; i < n; ++i) {
+        combination[i] = false;
+    }
+    int r;
+    for (int j = n - k + 1; j <= n; ++j) {
+        std::uniform_int_distribution<int> unif(1, j);
+        r = unif(gen);
+        if (combination[r-1]) {
+            combination[j-1] = true;
+        } else {
+            combination[r-1] = true;
+        }
+    }
+    /*
+    // DEBUG
+    std::cerr << "Selected random combination (" << n << ", " << k << "): ";
+    for (int i {0}; i < n; ++i) {
+        std::cerr << (combination[i] ? "1" : "0") << " ";
+    }
+    std::cerr << std::endl;
+    */
 }
 
 void recompute_dimensions() {
@@ -208,6 +246,7 @@ void sdl_init_renderer() {
     LOAD_TEXTURE(zoom_in);
     LOAD_TEXTURE(zoom_out);
     LOAD_TEXTURE(luck_neutral);
+    LOAD_TEXTURE(luck_great);
     LOAD_TEXTURE(luck_good);
     LOAD_TEXTURE(luck_bad);
 #undef LOAD_TEXTURE
@@ -245,6 +284,7 @@ void sdl_destroy_renderer() {
     UNLOAD_TEXTURE(zoom_in);
     UNLOAD_TEXTURE(zoom_out);
     UNLOAD_TEXTURE(luck_neutral);
+    UNLOAD_TEXTURE(luck_great);
     UNLOAD_TEXTURE(luck_good);
     UNLOAD_TEXTURE(luck_bad);
     SDL_DestroyRenderer(renderer);
@@ -304,8 +344,6 @@ Uint32 clock_cb(Uint32 interval, void* param) {
     return(interval);
 }
 
-
-
 void bucket_reveal(int x, int y) {
     if (!minefield[grid_width*y + x].visible) {
         minefield[grid_width*y + x].visible = true;
@@ -314,7 +352,6 @@ void bucket_reveal(int x, int y) {
     minefield[grid_width*y + x].flag = false;
     minefield[grid_width*y + x].qmark = false;
     if (minefield[grid_width*y + x].adj == 0) {
-        // TODO Fix stack overflow for very large grids
         for (int j = std::max(y - 1, 0); j <= std::min(y+1, grid_height-1); ++j) {
             for (int i = std::max(x - 1, 0); i <= std::min(x+1, grid_width-1); ++i) {
                 if (i == x && j == y) continue;
@@ -399,8 +436,6 @@ void new_game() {
     clock_timer_id = SDL_AddTimer(1000, clock_cb, nullptr);
 }
 
-
-
 int mines_remaining() {
     if (minefield == nullptr) {
         return 0;
@@ -434,39 +469,336 @@ int mines_displayed() {
     return status == game_active ? mines_remaining() : mines_total();
 }
 
-// Move the mine at given position to a randomly-selected non-visible mine-free position.
-// Return true on success, false if there's no mine at (x,y) or if there's nowhere to move the mine.
-bool displace_mine(int x, int y) {
-    if (!minefield[x + grid_width * y].mine) {
-        return false;
+int __WINAPI timeout_reached(lprec *lp, void *prev_ticks) {
+    (void)lp; // unused
+    if (SDL_GetTicks() - *((int *)prev_ticks) >= COMPUTE_TIMEOUT_MS) {
+        return (int)true;
+    } else {
+        return (int)false;
     }
-    int available_cells = 0;
-    for (int i = 0; i < grid_width * grid_height; ++i) {
-        if (!minefield[i].visible && !minefield[i].mine) {
-            ++available_cells;
+}
+
+bool cells_are_adjacent(int cell1_x, int cell1_y, int cell2_x, int cell2_y) {
+    return std::max(abs(cell1_x - cell2_x),
+                    abs(cell1_y - cell2_y)) == 1;
+}
+
+int count_adjacent_mines(int x, int y) {
+    int count {0};
+    for (int j = std::max(y - 1, 0); j <= std::min(y+1, grid_height-1); ++j) {
+        for (int i = std::max(x - 1, 0); i <= std::min(x+1, grid_width-1); ++i) {
+            if (i == x && j == y) continue;
+            if (minefield[grid_width*j + i].mine) {
+                ++count;
+            }
         }
     }
-    if (available_cells == 0) {
+    return count;
+}
+
+int count_adjacent_revealed_cells(int x, int y) {
+    int count {0};
+    for (int j = std::max(y - 1, 0); j <= std::min(y+1, grid_height-1); ++j) {
+        for (int i = std::max(x - 1, 0); i <= std::min(x+1, grid_width-1); ++i) {
+            if (i == x && j == y) continue;
+            if (minefield[grid_width*j + i].visible) {
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
+void recompute_minefield_adj() {
+    for (int y = 0; y < grid_height; ++y) {
+        for (int x = 0; x < grid_width; ++x) {
+            minefield[grid_width*y + x].adj = count_adjacent_mines(x, y);
+        }
+    }
+}
+
+// Attempt to (mine_present ? add : remove) a mine in the given grid location, in a way compatible with all revealed
+// numbers and the total number of mines. Return true if successful. Return false if the request is impossible, or if
+// the computation timed out.
+//
+// If the current minefield already satisfies the mine_present value at (x, y), do nothing, and return true.
+bool alter_minefield(int gridx, int gridy, bool mine_present) {
+    if (mine_present == minefield[grid_width*gridy + gridx].mine) {
+        // There's nothing to do.
+        return true;
+    }
+    if (minefield[grid_width*gridy + gridx].visible) {
+        // No way are we placing a mine in an already-revealed cell!
+        return mine_present == false;
+    }
+    int T = mines_total();
+    if (T == 0) {
+        std::cerr << "Aborting alter_minefield(): There are no mines to add." << std::endl;
         return false;
     }
-    std::uniform_int_distribution<int> d(1, available_cells);
-    int new_location = d(gen);
-    for (int j = 0; j < grid_height; ++j) {
-        for (int i = 0; i < grid_width; ++i) {
-            if (!minefield[i + grid_width*j].visible && !minefield[i + grid_width*j].mine) {
-                --new_location;
-                if (new_location == 0) {
-                    // Must spawn before removing, because remove_mine might make new
-                    // cells visible.
-                    spawn_mine(i, j);
-                    remove_mine(x, y);
-                    return true;
+    if (T == grid_width*grid_height && !mine_present) {
+        // The entire grid is full of mines.
+        std::cerr << "Aborting alter_minefield(): No way to remove a mine." << std::endl;
+        return false;
+    }
+
+   /* An explanation of how we solve the problem:
+    *
+    * Separate the hidden cells into two groups -- the shallowly-hidden cells: those that are adjacent to some revealed
+    * number, and the deeply-hidden cells: those that are not.
+    * Let dh_cells be the number of deeply-hidden cells.
+    * Let n be the number of shallowly-hidden cells.
+    * Let m be the number of revealed numbers (not counting the 0's, which are displayed blank.)
+    * Let T be the total number of mines (including any flagged mines -- treat flagged cells as ordinary hidden cells.)
+    *
+    * Look for a solution to the integer programming constraint satisfaction problem:
+    * Find x such that Ax = b, and x["clicked" position] = (0 if lucky; 1 if unlucky), and the number of 1's in x is
+    * between T - dh_cells and T inclusive.
+    * A: Adjacency matrix: known m*n binary matrix. A "1" indicates that the mine location is adjacent to the revealed
+    *    number.  Note that A is sparse: each row and each column has between 1 and 8 ones.
+    * x: Mine locations: unknown binary vector of length n
+    * b: Revealed numbers: known vector of length m; entries are the revealed numbers, each between 1 and 8 inclusive.
+    *
+    * If a solution is found, let S be the number of 1's in x, and distribute the remaining T - S mines randomly among
+    * the deeply-hidden cells.
+    *
+    * One fast way to solve Ax = b is to work over the finite field Z/2Z to find the subspace of solutions modulo 2. This
+    * can be done very quickly and efficiently (e.g., by Gaussian elimination). Then search through all the solutions
+    * modulo 2 to find the actual solutions over the integers. The time for the search step is
+    * m*n*n*(n-m)*exponential(n - m): Too large to be practical if n - m is large, that is, if there are many more
+    * boundary mine locations than revealed numbers. In typical gameplay, n - m tends to be small. Nevertheless, we
+    * invoke a general-purpose integer programming solver, instead.
+    *
+    * Finally, we need the (gridx, gridy) constraint (specified by the caller) to be met. If it's a shallowly-hidden
+    * cell, we simply add a constraint that the corresponding entry of x be equal to mine_present. If it's a
+    * deeply-hidden cell, then we modify dh_cells and possibly T when running the linear program, and make sure to place
+    * a mine at (gridx, gridy) at the end.
+    *
+    * If we wanted, we could attempt an optimization: partition the n shallowly-hidden cells into classes. Two
+    * cells belong to the same class if they are each adjacent to the same revealed number (more precisely: take the
+    * reflexive transitive closure of the "adjacency" relation specified by the matrix A.) Then solve the above integer
+    * programming problem for each class individually. and merge the results. This may actually be tricky, because (as
+    * Mathew Lewis pointed out) we don't know of any reason why the sets of "permissible numbers of mines" within each
+    * class should necessarily be convex, and it might be another difficult integer programming problem to pick a element
+    * from each of these sets so as to make the total equal to T. So for now, we won't do this.
+    *
+    * But splitting the shallowly-hidden cells into classes would help with very large grids, where in certain
+    * situations it's very slow to add constraints and even slower to run the solver.
+    */
+
+    int dh_cells {0};
+    int m {0};
+    int n {0};
+    bool requested_cell_is_deeply_hidden = count_adjacent_revealed_cells(gridx, gridy) == 0;
+    int dh_mine_count {0};
+    int sh_mine_count {0};
+    bool ran_lp {false};
+    bool success {false};
+    int solver_outcome {0};
+    lprec *lp;
+    REAL *ones;
+
+    // Pre-process minefield to generate a column lookup array for the shallowly-hidden cells.
+    int *column_lookup = new int[grid_width * grid_height]();  // Zero-initialized
+    for (int y = 0; y < grid_height; ++y) {
+        for (int x = 0; x < grid_width; ++x) {
+            if (minefield[y * grid_width + x].visible) {
+                if (minefield[y * grid_width + x].adj != 0) {
+                    // Revealed number
+                    ++m;
+                }
+            } else {  // Hidden cell
+                if (count_adjacent_revealed_cells(x, y) == 0) {
+                    // Deeply-hidden cell
+                    ++dh_cells;
+                    if (minefield[y * grid_width + x].mine) {
+                        ++dh_mine_count;
+                    }
+                } else {
+                    // Shallowly-hidden cell
+                    ++n;
+                    column_lookup[y*grid_width + x] = n;
+                    if (minefield[y * grid_width + x].mine) {
+                        ++sh_mine_count;
+                    }
                 }
             }
         }
     }
-    assert(false);
-    return false;
+    assert((m == 0) == (n == 0));
+    assert(T == sh_mine_count + dh_mine_count);
+
+    if (requested_cell_is_deeply_hidden) {
+        // Don't touch this cell: We'll pretend it doesn't exist, for now.
+        --dh_cells;
+        if (mine_present) {
+            --T;  // There's one fewer mine available for everywhere else.
+        }
+    }
+
+    if (m == 0) {
+        // No cells have been revealed yet.
+        ran_lp = false;
+        success = true;
+    } else if (requested_cell_is_deeply_hidden && mine_present && dh_mine_count > 0) {
+        // We can bring in a mine from elsewhere in the hidden area.
+        ran_lp = false;
+        success = true;
+    } else if (requested_cell_is_deeply_hidden && !mine_present && dh_mine_count < dh_cells) {
+        // We can push the mine out to elsewhere in the hidden area.
+        ran_lp = false;
+        success = true;
+    } else {
+        lp = make_lp(0, n);
+        //set_verbose(lp, FULL);
+        if (lp == nullptr) {
+            inform("Unable to create new LP model.");
+            delete[] column_lookup;
+            return false;
+        }
+
+        char lp_name[] {"Mine placement problem"};
+        set_lp_name(lp, lp_name);
+        for (auto j {1}; j <= n; ++j) {
+            // All entries of x must be 0 or 1.
+            set_binary(lp, j, true);
+        }
+        set_break_at_first(lp, true);  // Constraint satisfaction, not optimization.
+
+        // Row mode MUST only be enabled for adding the objective and constraints.
+        // No other lpsolve API calls are permitted when row mode is enabled.
+        set_add_rowmode(lp, TRUE);
+
+        // Trivial objective function, because we only care about feasibility/infeasibility.
+        REAL empty_row[1+0];
+        int empty_colno[1];  // zero-size arrays may be unsupported
+        set_obj_fnex(lp, 0, empty_row, empty_colno);
+
+        // Add a constraint (matrix row) for each revealed number.
+        REAL sparserow[8] {1, 1, 1, 1, 1, 1, 1, 1};
+        for (int y = 0; y < grid_height; ++y) {
+            for (int x = 0; x < grid_width; ++x) {
+                if (minefield[y*grid_width + x].visible && minefield[y*grid_width + x].adj != 0) {
+                    // (x, y) is a revealed number
+                    int colno[8] {};  // Sparserow will be "masked" by colno
+                    int neighbors {0};
+                    for (int j = std::max(y - 1, 0); j <= std::min(y + 1, grid_height - 1); ++j) {
+                        for (int i = std::max(x - 1, 0); i <= std::min(x + 1, grid_width - 1); ++i) {
+                            if (i == x && j == y) continue;
+                            if (!minefield[j*grid_width + i].visible) {
+                                colno[neighbors] = column_lookup[j*grid_width + i];
+                                ++neighbors;
+                            }
+                        }
+                    }
+                    add_constraintex(lp, neighbors, sparserow, colno, EQ, minefield[y*grid_width + x].adj);
+                    /*// DEBUG
+                    std::cerr << "Added constraint: ";
+                    for (int i = 0; i < neighbors; ++i) {
+                        std::cerr << "x_" << colno[i];
+                        if (i != neighbors - 1) std::cerr << " + ";
+                    }
+                    std::cerr << " = " << (int)minefield[y*grid_width + x].adj << std::endl;*/
+                }
+            }
+        }
+
+        int min_shallow_mines = T - dh_cells;
+        int max_shallow_mines = T;
+        ones = new REAL[1 + n];  // First element is ignored
+        for (auto j {1}; j <= n; ++j) {
+            ones[j] = 1;
+        }
+        add_constraint(lp, ones, GE, min_shallow_mines);
+        add_constraint(lp, ones, LE, max_shallow_mines);
+
+        // Require the caller's demand to be met, too.
+        if (!requested_cell_is_deeply_hidden) {
+            // This branch runs *almost* always. The only time it doesn't run is if the player clicks in the deeply
+            // hidden area, but the deeply hidden area is already full of mines, so one must be pushed out to the
+            // shallowly-hidden area.
+            int colno[1] {column_lookup[gridy*grid_width + gridx]};
+            add_constraintex(lp, 1, sparserow, colno, EQ, mine_present ? 1 : 0);
+        }
+
+        // Finished adding constraints.
+        set_add_rowmode(lp, FALSE);
+
+        assert(get_Nrows(lp) == m + 2 + (requested_cell_is_deeply_hidden ? 0 : 1));
+
+        int ticks = SDL_GetTicks();
+        put_abortfunc(lp, timeout_reached, (void *) &ticks);
+        solver_outcome = solve(lp);
+        success = solver_outcome == OPTIMAL || solver_outcome == SUBOPTIMAL;
+        ran_lp = true;
+    }
+
+    if (success) {  // Found a solution, or didn't need to run LP solver at all.
+        REAL *solution;
+
+        int S {0};  // The number of shallowly-hidden mines now. Might be different from the original sh_mine_count, if
+                    // we ran the LP solver.
+        if (ran_lp) {
+            solution = new REAL[n];
+            get_variables(lp, solution);
+            for (auto j {0}; j < n; ++j) {
+                //std::cout << solution[j] << " ";
+                S += std::lround(solution[j]);
+            }
+        } else {
+            // Shallowly-hidden mines are untouched.
+            S = sh_mine_count;
+        }
+
+        // Distribute the remaining T - S mines randomly among the dh_cells deeply hidden cells.
+        bool *dh_mines = new bool[dh_cells];
+        random_combination(dh_cells, T - S, dh_mines);
+        int sh_j {0};
+        int dh_j {0};
+        for (int y = 0; y < grid_height; ++y) {
+            for (int x = 0; x < grid_width; ++x) {
+                if (!minefield[y*grid_width+x].visible) {
+                    if (count_adjacent_revealed_cells(x, y) != 0) {  // Shallowly-hidden cell
+                        // If ran_lp == false here, it's because we determined that the shallowly-hidden cells don't
+                        // need to be touched.
+                        if (ran_lp) {
+                            minefield[y*grid_width+x].mine = solution[sh_j++] == 1 ? true : false;
+                        }
+                    } else if (not (x == gridx && y == gridy)) {  // Deeply-hidden non-ignored cell
+                        assert(dh_j < dh_cells);
+                        minefield[y*grid_width+x].mine = dh_mines[dh_j++];
+                    }
+                }
+            }
+        }
+        delete[] dh_mines;
+
+        if (requested_cell_is_deeply_hidden) {
+            minefield[gridy * grid_width + gridx].mine =  mine_present;
+        }
+        recompute_minefield_adj();
+
+        if (ran_lp) {
+            delete[] solution;
+        }
+        std::cerr << "Successfully shuffled mines around." << std::endl;
+    } else {
+        if (solver_outcome == USERABORT) {
+            std::cerr << "Computation timeout exceeded." << std::endl;
+        } else if (solver_outcome == INFEASIBLE) {
+            std::cerr << "No compatible minefield configuration exists." << std::endl;
+        } else {
+            std::cerr << "Failed to find a compatible minfield configuration: " <<  get_statustext(lp, solver_outcome) << std::endl;
+        }
+    }
+
+    if (ran_lp) {
+        delete_lp(lp);
+        delete[] ones;
+    }
+    delete[] column_lookup;
+
+    return success;
 }
 
 // Return true if (wx,wy) is inside the minefield grid area.
@@ -700,6 +1032,7 @@ void click_face() {
                 break;
             }
         }
+        // TODO If won == false, and if luck is enabled, see if we can win anyway.
         end_game(won);
     } else if (status == game_active) {
         end_game(false);
@@ -712,6 +1045,7 @@ SDL_Texture* current_luck_tex() {
     switch (config_luck) {
     default: [[fallthrough]];
     case neutral: return luck_neutral; break;
+    case great: return luck_great; break;
     case good: return luck_good; break;
     case bad: return luck_bad; break;
     }
@@ -719,7 +1053,8 @@ SDL_Texture* current_luck_tex() {
 void click_luck() {
     switch (config_luck) {
     default: [[fallthrough]];
-    case neutral: config_luck = good; break;
+    case neutral: config_luck = great; break;
+    case great: config_luck = good; break;
     case good: config_luck = bad; break;
     case bad: config_luck = neutral; break;
     }
@@ -797,13 +1132,13 @@ void register_toolbar_widgets() {
 }
 
 void render_toolbar() {
-    for (auto w : display3s) {
+    for (auto & w : display3s) {
         render_widget_display3(w);
     }
-    for (auto w : display1s) {
+    for (auto & w : display1s) {
         render_widget_display1(w);
     }
-    for (auto w : buttons) {
+    for (auto & w : buttons) {
         render_widget_button(w);
     }
 }
@@ -869,7 +1204,7 @@ void render_all() {
 }
 
 void chord_reveal(int x, int y) {
-
+    // TODO Chording should implement luck, too.
 
     int flag_count = 0;
 
@@ -962,6 +1297,7 @@ void game_main() {
                             grid_depressed_x = x;
                             grid_depressed_y = y;
                         }
+
                     } else if (evt.type == SDL_MOUSEBUTTONDOWN && evt.button.button == SDL_BUTTON_MIDDLE) {
                         for (int j = std::max(y - 1, 0); j <= std::min(y + 1, grid_height - 1); ++j) {
                             for (int i = std::max(x - 1, 0); i <= std::min(x + 1, grid_width - 1); ++i) {
@@ -1022,26 +1358,38 @@ void game_main() {
                               && !minefield[grid_width*y + x].flag
                               && !minefield[grid_width*y + x].qmark) {
                             bool reveal {false};
+                            luck luck_now {config_luck};
+                            if (first_move && config_luck != bad) {
+                              luck_now = great;
+                            }
+                            bool force_mine = luck_now == bad;
+                            // If luck is merely "good", then the player only gets lucky when clicking beside already-revealed cells.
+                            bool force_nomine = (luck_now == great) || (luck_now == good && count_adjacent_revealed_cells(x, y) > 0);
                             if (minefield[grid_width*y + x].mine) {
-                                if ((first_move || config_luck == good) && displace_mine(x,y)) {
+                                if (force_nomine && alter_minefield(x, y, false)) {
                                     reveal = true;
-                                } else {  // Neither first move nor lucky, or displace_mine() failed
+                                } else {
                                     minefield[grid_width*y + x].exploded = true;
                                     end_game(false);
                                     render_toolbar();  // For game-over face
                                 }
-                            } else {  // No mine here
-                                // TODO deal with bad luck
-                                reveal = true;
+                            } else {
+                                if (force_mine && alter_minefield(x, y, true)) {
+                                    minefield[grid_width*y + x].exploded = true;
+                                    end_game(false);
+                                    render_toolbar();  // For game-over face
+                                } else {
+                                    reveal = true;
+                                }
                             }
                             if (reveal) {
                                 bucket_reveal(x, y);
                                 if (visible_cell_count + mines_total() == grid_width * grid_height) {
-                                     // All non-mine cells revealed.
-                                     status = game_won;
-                                     SDL_RemoveTimer(clock_timer_id);  // Stop clock
+                                    // All non-mine cells revealed.
+                                    status = game_won;
+                                    SDL_RemoveTimer(clock_timer_id);  // Stop clock
                                 }
-                             }
+                            }
                             first_move = false;
                         }
                         grid_depressed = false;

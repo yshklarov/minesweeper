@@ -88,6 +88,8 @@ if(WIN32)
         include_directories("external/windows/${dir}/include")
         link_directories("external/windows/${dir}/lib/x64")
     endforeach()
+    include_directories("external/windows/lp_solve_5.5.2.11")
+    link_directories("external/windows/lp_solve_5.5.2.11")
 endif()
 
 
@@ -100,7 +102,7 @@ if(UNIX)
         Minesweeper PUBLIC
         ${SDL2_INCLUDE_DIRS})
 endif()
-target_link_libraries(Minesweeper PRIVATE SDL2 SDL2_image)
+target_link_libraries(Minesweeper PRIVATE SDL2 SDL2_image lpsolve55)
 
 
 ################
@@ -116,7 +118,9 @@ if(WIN32)
     # Copying DLLs (see <https://stackoverflow.com/questions/10671916>).
     set(WIN32_DLLS
         "SDL2-2.0.22/lib/x64/SDL2.dll"
-        "SDL2_image-2.6.0/lib/x64/SDL2_image.dll")
+        "SDL2_image-2.6.0/lib/x64/SDL2_image.dll"
+        "lp_solve_5.5.2.11/lpsolve55.dll"
+        )
   foreach(F IN LISTS WIN32_DLLS)
     add_custom_command(TARGET Minesweeper POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E
