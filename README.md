@@ -1,17 +1,17 @@
 Minesweeper
 ===========
 
-Minesweeper clone by yakov and 8.5tails.
+This is a clone of [Minesweeper](https://en.wikipedia.org/wiki/Minesweeper_(video_game)).
 
-There is a "luck" feature: Click the four-leaf clover. If you enable luck mode (green clover), whenever you left-click
-on a hidden cell, the program will attempt to rearrange the mines so that there's no mine in that cell, if it's possible
-to do so without modifying the visible numbers. This way you can avoid losing due to having to guess in the
-endgame. Analogously, there's a bad luck mode (red clover), which is useful for training yourself to avoid bad
+Here's what's special about it: Often, at the end of a Minesweeper game, you need to guess because there's more than one
+possible arrangement of mines. So this version has a "luck" feature: Click the four-leaf clover. If you enable luck mode
+(green clover), whenever you left-click on a hidden cell, the program will attempt to rearrange the mines so that
+there's no mine in that cell, if it's possible to do so without modifying the visible numbers or the total number of
+mines remaining. Analogously, there's a bad luck mode (red clover), which is useful for training yourself to avoid bad
 habits. If the clover is blue, you'll receive good luck when you click next to a visible number, but not when you click
-anywhere else.
+anywhere else. Note that chording (middle-click) currently ignores luck.
 
-Note that chording (middle-click) currently ignores luck.
-
+Made by yakov and 8.5tails.
 
 Screenshot
 ----------
@@ -19,13 +19,15 @@ Screenshot
 ![screenshot 1](screenshots/screenshot_1.png)
 
 
-Building
---------
+Installation and building
+-------------------------
 
 **Windows**:
 
-Either run cmake-gui, or "open folder" in Visual Studio. The required libraries are included in the source tree, so it
-should just work.
+Windows binaries are available [here](https://yakov.shklarov.com/minesweeper/).
+
+To build from source, either run cmake-gui, or "open folder" in Visual Studio. The required libraries are included in
+the source tree, so it should just work.
 
 
 **Linux**:
